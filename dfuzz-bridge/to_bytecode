@@ -1,0 +1,28 @@
+#!/bin/bash
+# Drop-in replacement for libfuzzer-js's to_bytecode
+# This version creates a marker file instead of actual bytecode
+# Usage: to_bytecode <input.js> <output.bytecode>
+
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <in javascript> <out bytecode>" >&2
+    exit 1
+fi
+
+INPUT_JS="$1"
+OUTPUT_BC="$2"
+
+# Verify input file exists
+if [ ! -f "$INPUT_JS" ]; then
+    echo "Error: Input file '$INPUT_JS' not found" >&2
+    exit 1
+fi
+
+# Create a marker file that references the JavaScript source
+echo "DFUZZ_JS:$INPUT_JS" > "$OUTPUT_BC"
+
+# Also copy the JavaScript file with the bytecode name for easier access
+# This helps modules find their JavaScript when running
+cp "$INPUT_JS" "${OUTPUT_BC%.bytecode}.js" 2>/dev/null || true
+
+echo "Created dfuzz marker: $OUTPUT_BC -> $INPUT_JS"
+exit 0

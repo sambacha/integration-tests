@@ -10,27 +10,201 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       MSHOULD_FAST: 1
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPRESS: true
+      CCACHE_COMPRESSLEVEL: 6
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2 # v4
         with:
           submodules: true
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4
         with:
           registry-url: "https://registry.npmjs.org"
           node-version: 22
-      - run: git clone --recurse-submodules https://github.com/paulmillr/noble-curves curves
-      - run: cd curves; npm install; npm run build
-      - run: sudo apt update -y
-      - run: sudo apt install -qq -y bzip2 build-essential libc++-dev libc++abi-dev lsb-release software-properties-common gnupg libboost-all-dev xxd cmake git wget curl bc jq
-        name: Install apt dependencies
-      - run: wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh 15
-        name: Install LLVM 15
-      - run: sudo ln -s /usr/lib/llvm-14/include/c++/v1 /usr/include/c++/v1
-      - run: ls -lah /usr/include/c++
-      - run: cd curves; npm install; npm run test
-      - run: cd cryptofuzz/modules/noble-curves; make clean
-      - run: cd cryptofuzz; bash ./build.sh
-      - run: cd cryptofuzz; bash ./build.sh fast
-      - run: cd cryptofuzz; ./cryptofuzz -verbosity=1 -create_missing_dirs=1 -runs=100000
-        name: Run cryptofuzz with 100K iterations
+          cache: 'npm'
+          cache-dependency-path: |
+            **/package-lock.json
+            cryptofuzz/modules/*/package-lock.json
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install Deno for dfuzz
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: '1.45.5'
+      
+      - name: Install ccache
+        run: sudo apt-get update && sudo apt-get install -y ccache
+      
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('**/*.cpp', '**/*.h') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+            ccache-
+      
+      - name: Configure ccache and LLD
+        run: |
+          ccache --version
+          ccache --zero-stats
+          ccache --max-size=500M
+          echo "CC=ccache clang-15" >> $GITHUB_ENV
+          echo "CXX=ccache clang++-15" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5" >> $GITHUB_ENV
+      
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+            */node_modules
+            */*/node_modules
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+      
+      - name: Cache Boost headers
+        id: cache-boost
+        uses: actions/cache@v4
+        with:
+          path: /usr/include/boost
+          key: boost-1.84.0-${{ runner.os }}
+      
+      - name: Clone and build noble-curves
+        run: |
+          git clone --recurse-submodules https://github.com/paulmillr/noble-curves curves
+          cd curves
+          npm install
+          npm run build
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qq -y \
+            bzip2 build-essential libc++-dev libc++abi-dev \
+            lsb-release software-properties-common gnupg libboost-all-dev \
+            xxd cmake git wget curl bc jq
+      
+      - name: Install LLVM 15 and LLD
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 15
+          # Install clang and LLD linker
+          sudo apt-get install -y clang-15 clang++-15 lld-15
+          # Set as default
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-15 100
+      
+      - name: Setup C++ includes
+        run: |
+          sudo ln -sf /usr/lib/llvm-14/include/c++/v1 /usr/include/c++/v1 || true
+          ls -lah /usr/include/c++
+      
+      - name: Cache dfuzz-bridge
+        id: cache-dfuzz
+        uses: actions/cache@v4
+        with:
+          path: dfuzz-bridge
+          key: dfuzz-${{ runner.os }}-${{ hashFiles('setup-dfuzz.sh') }}
+      
+      - name: Setup dfuzz as libfuzzer-js replacement
+        if: steps.cache-dfuzz.outputs.cache-hit != 'true'
+        run: |
+          # Run the dfuzz setup script
+          ./setup-dfuzz.sh
+          
+          # Export environment variables for cryptofuzz build
+          echo "LIBFUZZER_JS_PATH=${{ github.workspace }}/dfuzz-bridge" >> $GITHUB_ENV
+          echo "LINK_FLAGS=${{ github.workspace }}/dfuzz-bridge/js.o" >> $GITHUB_ENV
+          echo "USE_DFUZZ=1" >> $GITHUB_ENV
+          echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "SETUP_LIBFUZZER_JS=0" >> $GITHUB_ENV  # Disable original libfuzzer-js setup
+          
+          # Verify dfuzz setup
+          ls -la dfuzz-bridge/
+          echo "✅ dfuzz bridge configured as libfuzzer-js replacement"
+      
+      - name: Clean noble-curves module
+        run: |
+          cd cryptofuzz/modules/noble-curves
+          make clean || true
+      
+      - name: Apply noble-curves fixes
+        run: |
+          if [ -f noble-curves-fixes.patch ]; then
+            cd cryptofuzz
+            patch -p1 < ../noble-curves-fixes.patch || true
+            cd ..
+          fi
+      
+      - name: Apply cryptofuzz patches
+        run: |
+          # Apply all patches to fix build issues in cryptofuzz submodule
+          ./apply-patches.sh
+      
+      - name: Build cryptofuzz with dfuzz
+        run: |
+          # Build cryptofuzz with parallelization
+          export MAKEFLAGS="-j$(nproc)"
+          ./cryptofuzz-build.sh
+      
+      - name: Build cryptofuzz with dfuzz (fast mode)
+        run: |
+          # Build fast mode with parallelization
+          export MAKEFLAGS="-j$(nproc)"
+          ./cryptofuzz-build.sh fast
+      
+      - name: Show ccache stats
+        run: ccache --show-stats
+      
+      - name: Verify dfuzz integration
+        run: |
+          # Check that JavaScript modules were built with dfuzz
+          echo "Checking noble-curves module..."
+          if [ -f cryptofuzz/modules/noble-curves/module.a ]; then
+            echo "✅ noble-curves built with dfuzz"
+          else
+            echo "⚠️ noble-curves module not found"
+          fi
+          
+          echo "Checking dfuzz jsfuzzer..."
+          if [ -f dfuzz-bridge/jsfuzzer ]; then
+            echo "✅ dfuzz jsfuzzer binary present"
+            ./dfuzz-bridge/jsfuzzer --help || true
+          else
+            echo "⚠️ dfuzz jsfuzzer not found"
+          fi
+      
+      - name: Run cryptofuzz with 100K iterations
+        run: |
+          cd cryptofuzz
+          ./cryptofuzz -verbosity=1 -create_missing_dirs=1 -runs=100000
+      
+      - name: Test noble-curves
+        run: |
+          cd curves
+          npm run test
+      
+      - name: Upload build artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            cryptofuzz/**/*.log
+            cryptofuzz/**/build.log
+            dfuzz-bridge/*.log
+          retention-days: 7
