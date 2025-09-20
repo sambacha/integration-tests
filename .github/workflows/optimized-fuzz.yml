@@ -19,6 +19,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  ACTIONS_RUNNER_DEBUG: true
+
 jobs:
   # Job 1: Setup dependencies and create caches
   setup:
@@ -219,7 +222,7 @@ jobs:
           echo "LINK_FLAGS=$PWD/dfuzz-bridge/js.o" >> $GITHUB_ENV
           echo "USE_DFUZZ=1" >> $GITHUB_ENV
           echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
-          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fno-omit-frame-pointer -DCRYPTOFUZZ_NO_OPENSSL" >> $GITHUB_ENV
           echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
           echo "CC=ccache clang-15" >> $GITHUB_ENV
           echo "CXX=ccache clang++-15" >> $GITHUB_ENV

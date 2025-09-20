@@ -20,6 +20,7 @@ on:
           - comprehensive  # 2-3 hours with all vectors
 
 env:
+  ACTIONS_RUNNER_DEBUG: true
   NODE_VERSION: '20'
   PYTHON_VERSION: '3.11'
   CRYPTO_CONDOR_VERSION: '2024.08.23'

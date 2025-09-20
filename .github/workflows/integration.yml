@@ -9,6 +9,7 @@ jobs:
     name: Integration tests
     runs-on: ubuntu-24.04
     env:
+      ACTIONS_RUNNER_DEBUG: true
       MSHOULD_FAST: 1
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: true
@@ -81,7 +82,7 @@ jobs:
           ccache --max-size=500M
           echo "CC=ccache clang-15" >> $GITHUB_ENV
           echo "CXX=ccache clang++-15" >> $GITHUB_ENV
-          echo "CXXFLAGS=-g -O2 -gdwarf-5 -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "CXXFLAGS=-g -O2 -gdwarf-5 -fno-omit-frame-pointer -DCRYPTOFUZZ_NO_OPENSSL" >> $GITHUB_ENV
           echo "LDFLAGS=-fuse-ld=lld -gdwarf-5" >> $GITHUB_ENV
       
       - name: Apply noble-curves fixes

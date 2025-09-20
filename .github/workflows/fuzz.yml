@@ -9,6 +9,7 @@ jobs:
     name: Fuzzing
     runs-on: ubuntu-22.04
     env:
+      ACTIONS_RUNNER_DEBUG: true
       MSHOULD_FAST: 1
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: true
@@ -130,7 +131,7 @@ jobs:
           echo "LINK_FLAGS=${{ github.workspace }}/dfuzz-bridge/js.o" >> $GITHUB_ENV
           echo "USE_DFUZZ=1" >> $GITHUB_ENV
           echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
-          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fno-omit-frame-pointer -DCRYPTOFUZZ_NO_OPENSSL" >> $GITHUB_ENV
           echo "SETUP_LIBFUZZER_JS=0" >> $GITHUB_ENV  # Disable original libfuzzer-js setup
           
           # Verify dfuzz setup
