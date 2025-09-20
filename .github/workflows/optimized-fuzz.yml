@@ -1,0 +1,323 @@
+name: Optimized Fuzzing Pipeline
+
+on:
+  push:
+    branches: [main, optimize-ci]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: 'Fuzzing duration in seconds'
+        required: false
+        default: '100000'
+
+# Cancel in-progress runs when a new run is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Job 1: Setup dependencies and create caches
+  setup:
+    name: Setup Dependencies
+    runs-on: ubuntu-22.04
+    outputs:
+      cache-hit: ${{ steps.cache-check.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: '1.45.5'
+      
+      - name: Cache all dependencies
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache
+            ~/.npm
+            ~/.deno
+            /usr/include/boost
+            ~/llvm-15
+            dfuzz-bridge
+          key: deps-${{ runner.os }}-${{ hashFiles('**/package-lock.json', 'setup-dfuzz.sh') }}
+          restore-keys: |
+            deps-${{ runner.os }}-
+      
+      - name: Install system dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qq -y \
+            bzip2 build-essential libc++-dev libc++abi-dev \
+            lsb-release software-properties-common gnupg libboost-all-dev \
+            xxd cmake git wget curl bc jq ccache
+          
+          # Install LLVM 15 if not cached
+          if [ ! -d ~/llvm-15 ]; then
+            wget -q https://apt.llvm.org/llvm.sh
+            chmod +x llvm.sh
+            sudo ./llvm.sh 15
+            mkdir -p ~/llvm-15
+            cp -r /usr/lib/llvm-15 ~/llvm-15/
+          fi
+      
+      - name: Setup dfuzz bridge
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          ./setup-dfuzz.sh
+          echo "LIBFUZZER_JS_PATH=$PWD/dfuzz-bridge" >> $GITHUB_ENV
+          echo "LINK_FLAGS=$PWD/dfuzz-bridge/js.o" >> $GITHUB_ENV
+          echo "USE_DFUZZ=1" >> $GITHUB_ENV
+          echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
+      
+      - name: Cache check output
+        id: cache-check
+        run: echo "cache-hit=${{ steps.cache-deps.outputs.cache-hit }}"
+
+  # Job 2: Build JavaScript modules in parallel
+  build-modules:
+    name: Build Module - ${{ matrix.module }}
+    needs: setup
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [noble-curves, noble-hashes, bn.js, elliptic, crypto-js]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache
+            ~/.npm
+            ~/.deno
+            /usr/include/boost
+            ~/llvm-15
+            dfuzz-bridge
+          key: deps-${{ runner.os }}-${{ hashFiles('**/package-lock.json', 'setup-dfuzz.sh') }}
+      
+      - name: Setup build environment
+        run: |
+          echo "LIBFUZZER_JS_PATH=$PWD/dfuzz-bridge" >> $GITHUB_ENV
+          echo "LINK_FLAGS=$PWD/dfuzz-bridge/js.o" >> $GITHUB_ENV
+          echo "USE_DFUZZ=1" >> $GITHUB_ENV
+          echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
+          echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
+          echo "CC=ccache gcc" >> $GITHUB_ENV
+          echo "CXX=ccache g++" >> $GITHUB_ENV
+      
+      - name: Setup ccache for module
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache-${{ matrix.module }}
+          key: ccache-module-${{ matrix.module }}-${{ hashFiles('cryptofuzz/modules/${{ matrix.module }}/**') }}
+          restore-keys: |
+            ccache-module-${{ matrix.module }}-
+      
+      - name: Build ${{ matrix.module }}
+        run: |
+          cd cryptofuzz
+          python3 gen_repository.py
+          
+          cd modules/${{ matrix.module }}
+          [ -f package.json ] && npm install
+          make clean
+          make -j$(nproc)
+          
+          # Verify build
+          if [ -f module.a ]; then
+            echo "✅ ${{ matrix.module }} built successfully"
+          else
+            echo "❌ ${{ matrix.module }} build failed"
+            exit 1
+          fi
+      
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-${{ matrix.module }}
+          path: cryptofuzz/modules/${{ matrix.module }}/module.a
+          retention-days: 1
+
+  # Job 3: Build main cryptofuzz binary
+  build-fuzzer:
+    name: Build Cryptofuzz
+    needs: [setup, build-modules]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache
+            ~/.npm
+            ~/.deno
+            /usr/include/boost
+            ~/llvm-15
+            dfuzz-bridge
+          key: deps-${{ runner.os }}-${{ hashFiles('**/package-lock.json', 'setup-dfuzz.sh') }}
+      
+      - name: Download all module artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: module-*
+          path: cryptofuzz/modules/
+      
+      - name: Restore module artifacts
+        run: |
+          # Move module.a files to correct locations
+          for module in noble-curves noble-hashes bn.js elliptic crypto-js; do
+            if [ -d "cryptofuzz/modules/module-$module" ]; then
+              mv cryptofuzz/modules/module-$module/module.a cryptofuzz/modules/$module/
+              rmdir cryptofuzz/modules/module-$module
+            fi
+          done
+      
+      - name: Setup build environment
+        run: |
+          echo "LIBFUZZER_JS_PATH=$PWD/dfuzz-bridge" >> $GITHUB_ENV
+          echo "LINK_FLAGS=$PWD/dfuzz-bridge/js.o" >> $GITHUB_ENV
+          echo "USE_DFUZZ=1" >> $GITHUB_ENV
+          echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2" >> $GITHUB_ENV
+          echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
+          echo "CC=ccache gcc" >> $GITHUB_ENV
+          echo "CXX=ccache g++" >> $GITHUB_ENV
+      
+      - name: Setup ccache for fuzzer
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-fuzzer-${{ hashFiles('cryptofuzz/**/*.cpp', 'cryptofuzz/**/*.h') }}
+          restore-keys: |
+            ccache-fuzzer-
+      
+      - name: Build cryptofuzz binary
+        run: |
+          cd cryptofuzz
+          python3 gen_repository.py
+          
+          # Build with parallelization
+          make clean
+          make -j$(nproc)
+          
+          if [ -f cryptofuzz ]; then
+            echo "✅ Cryptofuzz built successfully"
+            ls -lh cryptofuzz
+          else
+            echo "❌ Cryptofuzz build failed"
+            exit 1
+          fi
+      
+      - name: Upload fuzzer binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cryptofuzz-binary
+          path: cryptofuzz/cryptofuzz
+          retention-days: 7
+
+  # Job 4: Run fuzzing tests
+  fuzz-test:
+    name: Fuzz Testing
+    needs: build-fuzzer
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        test_type: [quick, extended]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download fuzzer binary
+        uses: actions/download-artifact@v4
+        with:
+          name: cryptofuzz-binary
+          path: cryptofuzz/
+      
+      - name: Make fuzzer executable
+        run: chmod +x cryptofuzz/cryptofuzz
+      
+      - name: Run ${{ matrix.test_type }} fuzzing
+        run: |
+          cd cryptofuzz
+          
+          if [ "${{ matrix.test_type }}" = "quick" ]; then
+            RUNS=10000
+            TIMEOUT=30
+          else
+            RUNS="${{ github.event.inputs.fuzz_duration || '100000' }}"
+            TIMEOUT=300
+          fi
+          
+          timeout ${TIMEOUT}s ./cryptofuzz \
+            -verbosity=1 \
+            -create_missing_dirs=1 \
+            -runs=$RUNS || true
+          
+          echo "✅ ${{ matrix.test_type }} fuzzing completed"
+      
+      - name: Upload fuzzing artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.test_type }}
+          path: |
+            cryptofuzz/crash-*
+            cryptofuzz/oom-*
+            cryptofuzz/timeout-*
+            cryptofuzz/corpus/
+          retention-days: 30
+
+  # Summary job
+  summary:
+    name: Pipeline Summary
+    needs: [setup, build-modules, build-fuzzer, fuzz-test]
+    runs-on: ubuntu-22.04
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🚀 Optimized Fuzzing Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Build Status" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Setup | ${{ needs.setup.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Modules | ${{ needs.build-modules.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Fuzzer | ${{ needs.build-fuzzer.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Fuzz Test | ${{ needs.fuzz-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.fuzz-test.result }}" = "success" ]; then
+            echo "✅ **All tests passed successfully!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ **Some tests failed. Check the logs for details.**" >> $GITHUB_STEP_SUMMARY
+          fi

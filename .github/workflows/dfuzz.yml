@@ -12,34 +12,52 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest]
     
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: true
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
           
       - name: Setup dfuzz
         uses: ./.github/actions/setup-dfuzz
+      
+      - name: Setup build environment
+        run: |
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2" >> $GITHUB_ENV
+          echo "MAKEFLAGS=-j$(nproc 2>/dev/null || sysctl -n hw.ncpu)" >> $GITHUB_ENV
         
       - name: Build cryptofuzz with dfuzz
         run: |
           cd cryptofuzz
           python3 gen_repository.py
           
-          # Build JavaScript modules with dfuzz
+          # Build JavaScript modules with dfuzz in parallel
           for module in noble-curves noble-hashes bn.js elliptic; do
-            echo "Building $module..."
-            cd modules/$module
-            [ -f package.json ] && npm install
-            make clean && make
-            cd ../..
+            (
+              echo "Building $module..."
+              cd modules/$module
+              [ -f package.json ] && npm install
+              make clean && make
+            ) &
           done
           
+          # Wait for all background jobs
+          wait
+          
           # Build main fuzzer
-          export CXXFLAGS="-fsanitize=fuzzer,address -g -O2"
-          export LIBFUZZER_LINK="-fsanitize=fuzzer"
           make clean && make
           
       - name: Run smoke test
@@ -47,3 +65,10 @@ jobs:
           cd cryptofuzz
           timeout 10s ./cryptofuzz || true
           echo "✅ Fuzzer built successfully with dfuzz"
+      
+      - name: Upload fuzzer binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cryptofuzz-${{ matrix.os }}
+          path: cryptofuzz/cryptofuzz
+          retention-days: 7
