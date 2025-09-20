@@ -51,8 +51,19 @@ jobs:
             integration-repos-${{ runner.os }}-
             integration-repos-
       
-      - name: Install ccache
-        run: sudo apt-get update && sudo apt-get install -y ccache
+      - name: Install LLVM, LLD and ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
+          # Install LLVM 15 and LLD for faster linking
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 15
+          sudo apt-get install -y clang-15 clang++-15 lld-15
+          # Set as default
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-15 100
       
       - name: Setup ccache
         uses: actions/cache@v4
@@ -63,13 +74,15 @@ jobs:
             ccache-integration-${{ runner.os }}-
             ccache-integration-
       
-      - name: Configure ccache
+      - name: Configure ccache and LLD
         run: |
           ccache --version
           ccache --zero-stats
           ccache --max-size=500M
-          echo "CC=ccache gcc" >> $GITHUB_ENV
-          echo "CXX=ccache g++" >> $GITHUB_ENV
+          echo "CC=ccache clang-15" >> $GITHUB_ENV
+          echo "CXX=ccache clang++-15" >> $GITHUB_ENV
+          echo "CXXFLAGS=-g -O2 -gdwarf-5 -fuse-ld=lld -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto" >> $GITHUB_ENV
       
       - name: Apply noble-curves fixes
         run: |

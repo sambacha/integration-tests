@@ -36,7 +36,19 @@ jobs:
       
       - name: Setup build environment
         run: |
-          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2" >> $GITHUB_ENV
+          # Use clang for fuzzer sanitizer support
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update && sudo apt-get install -y clang-15 clang++-15 lld-15
+            echo "CC=clang-15" >> $GITHUB_ENV
+            echo "CXX=clang++-15" >> $GITHUB_ENV
+            sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-15 100
+          else
+            # macOS - use system clang
+            echo "CC=clang" >> $GITHUB_ENV
+            echo "CXX=clang++" >> $GITHUB_ENV
+          fi
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fuse-ld=lld -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto" >> $GITHUB_ENV
           echo "MAKEFLAGS=-j$(nproc 2>/dev/null || sysctl -n hw.ncpu)" >> $GITHUB_ENV
         
       - name: Build cryptofuzz with dfuzz

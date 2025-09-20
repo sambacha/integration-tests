@@ -52,13 +52,14 @@ jobs:
             ccache-${{ runner.os }}-
             ccache-
       
-      - name: Configure ccache
+      - name: Configure ccache and LLD
         run: |
           ccache --version
           ccache --zero-stats
           ccache --max-size=500M
-          echo "CC=ccache gcc" >> $GITHUB_ENV
-          echo "CXX=ccache g++" >> $GITHUB_ENV
+          echo "CC=ccache clang-15" >> $GITHUB_ENV
+          echo "CXX=ccache clang++-15" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto" >> $GITHUB_ENV
       
       - name: Cache npm dependencies
         uses: actions/cache@v4
@@ -94,11 +95,17 @@ jobs:
             lsb-release software-properties-common gnupg libboost-all-dev \
             xxd cmake git wget curl bc jq
       
-      - name: Install LLVM 15
+      - name: Install LLVM 15 and LLD
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 15
+          # Install clang and LLD linker
+          sudo apt-get install -y clang-15 clang++-15 lld-15
+          # Set as default
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-15 100
       
       - name: Setup C++ includes
         run: |
@@ -123,6 +130,7 @@ jobs:
           echo "LINK_FLAGS=${{ github.workspace }}/dfuzz-bridge/js.o" >> $GITHUB_ENV
           echo "USE_DFUZZ=1" >> $GITHUB_ENV
           echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fuse-ld=lld -fno-omit-frame-pointer" >> $GITHUB_ENV
           echo "SETUP_LIBFUZZER_JS=0" >> $GITHUB_ENV  # Disable original libfuzzer-js setup
           
           # Verify dfuzz setup
