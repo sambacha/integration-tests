@@ -143,6 +143,20 @@ jobs:
           cd cryptofuzz/modules/noble-curves
           make clean || true
       
+      - name: Apply cryptofuzz-openssl patch
+        run: |
+          if [ -f cryptofuzz-openssl.patch ]; then
+            echo "Applying cryptofuzz-openssl.patch to cryptofuzz directory..."
+            cd cryptofuzz
+            git apply --stat ../cryptofuzz-openssl.patch
+            git apply --check ../cryptofuzz-openssl.patch || true
+            git apply ../cryptofuzz-openssl.patch || patch -p1 < ../cryptofuzz-openssl.patch || true
+            cd ..
+            echo "✅ Applied cryptofuzz-openssl.patch"
+          else
+            echo "⚠️ cryptofuzz-openssl.patch not found"
+          fi
+      
       - name: Apply noble-curves fixes
         run: |
           if [ -f noble-curves-fixes.patch ]; then
