@@ -11,6 +11,20 @@ echo "Building cryptofuzz..."
 # Set up environment variables
 export CXXFLAGS="${CXXFLAGS:-} -I/usr/include/boost"
 
+# Apply patches to cryptofuzz if they exist
+if [ -f "libfuzzer-js.patch" ]; then
+    echo "Applying libfuzzer-js patch..."
+    cd cryptofuzz
+    patch -p1 < ../libfuzzer-js.patch || true
+    cd ..
+fi
+
+# Setup libfuzzer-js if needed
+if [ -f "setup-libfuzzer-js.sh" ] && [ "$SETUP_LIBFUZZER_JS" = "1" ]; then
+    echo "Setting up libfuzzer-js..."
+    source ./setup-libfuzzer-js.sh
+fi
+
 # Enter cryptofuzz directory
 cd cryptofuzz
 
