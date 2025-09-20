@@ -36,9 +36,7 @@ jobs:
           deno-version: '1.45.5'
       
       - name: Install ccache
-        run: sudo apt-get update && sudo apt-get install -qqy --assume-yes --no-install-recommends bzip2 build-essential libc++-dev libc++abi-dev \
-            lsb-release software-properties-common gnupg libboost-all-dev xxd \
-            cmake git wget curl bc jq ccache
+        run: sudo apt-get update && sudo apt-get install -qqy --assume-yes --no-install-recommends bzip2 build-essential libc++-dev libc++abi-dev lsb-release software-properties-common gnupg libboost-all-dev xxd cmake git wget curl bc jq ccache
       
       - name: Setup ccache
         uses: actions/cache@v4
