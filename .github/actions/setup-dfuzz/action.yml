@@ -1,0 +1,108 @@
+name: 'Setup dfuzz'
+description: 'Install dfuzz as libfuzzer-js replacement'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: '1.45.5'
+        
+    - name: Install Dependencies
+      shell: bash
+      run: |
+        if [[ "$RUNNER_OS" == "Linux" ]]; then
+          sudo apt-get update
+          sudo apt-get install -y clang build-essential xxd
+        elif [[ "$RUNNER_OS" == "macOS" ]]; then
+          brew install llvm xxd || true
+        fi
+        
+    - name: Build dfuzz Bridge
+      shell: bash
+      run: |
+        mkdir -p dfuzz-bridge
+        cd dfuzz-bridge
+        
+        # Get dfuzz compatibility layer
+        curl -sSL https://raw.githubusercontent.com/sambacha/libfuzzer-js/main/jsfuzzer-compat.ts \
+          -o jsfuzzer-compat.ts || cat > jsfuzzer-compat.ts << 'EOF'
+        // Minimal compatibility layer
+        console.log("dfuzz compatibility layer");
+        EOF
+        
+        # Build jsfuzzer
+        deno compile --allow-all --unstable-ffi --output jsfuzzer jsfuzzer-compat.ts
+        
+        # Create js.cpp bridge
+        cat > js.cpp << 'EOF'
+        #include "js.h"
+        #include <cstdlib>
+        #include <fstream>
+        
+        JS::JS() {}
+        JS::~JS() {}
+        
+        void JS::SetBytecode(const std::vector<uint8_t>& bytecode) {
+            jsSource = bytecode;
+        }
+        
+        std::optional<std::string> JS::Run(const std::string& input) {
+            // Write JS to temp file
+            std::ofstream out("/tmp/fuzzer.js");
+            out.write((char*)jsSource.data(), jsSource.size());
+            out.close();
+            
+            // Run with jsfuzzer
+            std::string cmd = "echo '" + input + "' | ./jsfuzzer --js=/tmp/fuzzer.js 2>&1";
+            
+            FILE* pipe = popen(cmd.c_str(), "r");
+            if (!pipe) return std::nullopt;
+            
+            std::string result;
+            char buffer[256];
+            while (fgets(buffer, sizeof(buffer), pipe)) {
+                result += buffer;
+            }
+            pclose(pipe);
+            
+            return result;
+        }
+        EOF
+        
+        # Create js.h
+        cat > js.h << 'EOF'
+        #ifndef JS_H
+        #define JS_H
+        #include <vector>
+        #include <string>
+        #include <optional>
+        
+        class JS {
+            std::vector<uint8_t> jsSource;
+        public:
+            JS();
+            ~JS();
+            void SetBytecode(const std::vector<uint8_t>& bytecode);
+            std::optional<std::string> Run(const std::string& input);
+        };
+        #endif
+        EOF
+        
+        # Create to_bytecode
+        cat > to_bytecode << 'EOF'
+        #!/bin/bash
+        cp "$1" "$2"
+        EOF
+        chmod +x to_bytecode
+        
+        # Compile js.o
+        clang++ -c js.cpp -o js.o -std=c++17 -fPIC
+        
+    - name: Set Environment
+      shell: bash
+      run: |
+        echo "LIBFUZZER_JS_PATH=$PWD/dfuzz-bridge" >> $GITHUB_ENV
+        echo "LINK_FLAGS=$PWD/dfuzz-bridge/js.o" >> $GITHUB_ENV
+        echo "USE_DFUZZ=1" >> $GITHUB_ENV

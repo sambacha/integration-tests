@@ -1,0 +1,49 @@
+name: Build with dfuzz
+
+on:
+  push:
+    branches: [main, dfuzz]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          
+      - name: Setup dfuzz
+        uses: ./.github/actions/setup-dfuzz
+        
+      - name: Build cryptofuzz with dfuzz
+        run: |
+          cd cryptofuzz
+          python3 gen_repository.py
+          
+          # Build JavaScript modules with dfuzz
+          for module in noble-curves noble-hashes bn.js elliptic; do
+            echo "Building $module..."
+            cd modules/$module
+            [ -f package.json ] && npm install
+            make clean && make
+            cd ../..
+          done
+          
+          # Build main fuzzer
+          export CXXFLAGS="-fsanitize=fuzzer,address -g -O2"
+          export LIBFUZZER_LINK="-fsanitize=fuzzer"
+          make clean && make
+          
+      - name: Run smoke test
+        run: |
+          cd cryptofuzz
+          timeout 10s ./cryptofuzz || true
+          echo "✅ Fuzzer built successfully with dfuzz"

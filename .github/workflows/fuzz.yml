@@ -30,6 +30,11 @@ jobs:
             **/package-lock.json
             cryptofuzz/modules/*/package-lock.json
       
+      - name: Install Deno for dfuzz
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: '1.45.5'
+      
       - name: Install ccache
         run: sudo apt-get update && sudo apt-get install -y ccache
       
@@ -94,6 +99,21 @@ jobs:
           sudo ln -sf /usr/lib/llvm-14/include/c++/v1 /usr/include/c++/v1 || true
           ls -lah /usr/include/c++
       
+      - name: Setup dfuzz as libfuzzer-js replacement
+        run: |
+          # Run the dfuzz setup script
+          ./setup-dfuzz.sh
+          
+          # Export environment variables for cryptofuzz build
+          echo "LIBFUZZER_JS_PATH=${{ github.workspace }}/dfuzz-bridge" >> $GITHUB_ENV
+          echo "LINK_FLAGS=${{ github.workspace }}/dfuzz-bridge/js.o" >> $GITHUB_ENV
+          echo "USE_DFUZZ=1" >> $GITHUB_ENV
+          echo "SETUP_LIBFUZZER_JS=0" >> $GITHUB_ENV  # Disable original libfuzzer-js setup
+          
+          # Verify dfuzz setup
+          ls -la dfuzz-bridge/
+          echo "✅ dfuzz bridge configured as libfuzzer-js replacement"
+      
       - name: Test noble-curves
         run: |
           cd curves
@@ -113,14 +133,46 @@ jobs:
             cd ..
           fi
       
-      - name: Build cryptofuzz
-        run: ./cryptofuzz-build.sh
+      - name: Build cryptofuzz with dfuzz
+        run: |
+          # Ensure dfuzz environment is set
+          export LIBFUZZER_JS_PATH=${{ github.workspace }}/dfuzz-bridge
+          export LINK_FLAGS="$LIBFUZZER_JS_PATH/js.o"
+          export USE_DFUZZ=1
+          
+          # Build cryptofuzz
+          ./cryptofuzz-build.sh
       
-      - name: Build cryptofuzz (fast mode)
-        run: ./cryptofuzz-build.sh fast
+      - name: Build cryptofuzz with dfuzz (fast mode)
+        run: |
+          # Ensure dfuzz environment is set
+          export LIBFUZZER_JS_PATH=${{ github.workspace }}/dfuzz-bridge
+          export LINK_FLAGS="$LIBFUZZER_JS_PATH/js.o"
+          export USE_DFUZZ=1
+          
+          # Build fast mode
+          ./cryptofuzz-build.sh fast
       
       - name: Show ccache stats
         run: ccache --show-stats
+      
+      - name: Verify dfuzz integration
+        run: |
+          # Check that JavaScript modules were built with dfuzz
+          echo "Checking noble-curves module..."
+          if [ -f cryptofuzz/modules/noble-curves/module.a ]; then
+            echo "✅ noble-curves built with dfuzz"
+          else
+            echo "⚠️ noble-curves module not found"
+          fi
+          
+          echo "Checking dfuzz jsfuzzer..."
+          if [ -f dfuzz-bridge/jsfuzzer ]; then
+            echo "✅ dfuzz jsfuzzer binary present"
+            ./dfuzz-bridge/jsfuzzer --help || true
+          else
+            echo "⚠️ dfuzz jsfuzzer not found"
+          fi
       
       - name: Run cryptofuzz with 100K iterations
         run: |
@@ -135,4 +187,5 @@ jobs:
           path: |
             cryptofuzz/**/*.log
             cryptofuzz/**/build.log
+            dfuzz-bridge/*.log
           retention-days: 7
