@@ -150,6 +150,11 @@ jobs:
             cd ..
           fi
       
+      - name: Apply cryptofuzz patches
+        run: |
+          # Apply all patches to fix build issues in cryptofuzz submodule
+          ./apply-patches.sh
+      
       - name: Build cryptofuzz with dfuzz
         run: |
           # Build cryptofuzz with parallelization

@@ -51,6 +51,11 @@ jobs:
           echo "LDFLAGS=-fuse-ld=lld -gdwarf-5" >> $GITHUB_ENV
           echo "MAKEFLAGS=-j$(nproc 2>/dev/null || sysctl -n hw.ncpu)" >> $GITHUB_ENV
         
+      - name: Apply cryptofuzz patches
+        run: |
+          # Apply all patches before building
+          ./apply-patches.sh
+      
       - name: Build cryptofuzz with dfuzz
         run: |
           cd cryptofuzz

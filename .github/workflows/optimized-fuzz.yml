@@ -145,6 +145,11 @@ jobs:
           restore-keys: |
             ccache-module-${{ matrix.module }}-
       
+      - name: Apply patches for ${{ matrix.module }}
+        run: |
+          # Apply patches before building
+          ./apply-patches.sh
+      
       - name: Build ${{ matrix.module }}
         run: |
           cd cryptofuzz
@@ -227,6 +232,11 @@ jobs:
           key: ccache-fuzzer-${{ hashFiles('cryptofuzz/**/*.cpp', 'cryptofuzz/**/*.h') }}
           restore-keys: |
             ccache-fuzzer-
+      
+      - name: Apply cryptofuzz patches
+        run: |
+          # Apply all patches before building
+          ./apply-patches.sh
       
       - name: Build cryptofuzz binary
         run: |

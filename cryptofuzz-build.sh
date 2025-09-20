@@ -12,7 +12,10 @@ echo "Building cryptofuzz..."
 export CXXFLAGS="${CXXFLAGS:-} -I/usr/include/boost"
 
 # Apply patches to cryptofuzz if they exist
-if [ -f "libfuzzer-js.patch" ]; then
+if [ -f "apply-patches.sh" ]; then
+    echo "Applying cryptofuzz patches..."
+    ./apply-patches.sh
+elif [ -f "libfuzzer-js.patch" ]; then
     echo "Applying libfuzzer-js patch..."
     cd cryptofuzz
     patch -p1 < ../libfuzzer-js.patch || true
