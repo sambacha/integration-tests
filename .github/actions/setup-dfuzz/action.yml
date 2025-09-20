@@ -106,3 +106,4 @@ runs:
         echo "LIBFUZZER_JS_PATH=$PWD/dfuzz-bridge" >> $GITHUB_ENV
         echo "LINK_FLAGS=$PWD/dfuzz-bridge/js.o" >> $GITHUB_ENV
         echo "USE_DFUZZ=1" >> $GITHUB_ENV
+        echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
