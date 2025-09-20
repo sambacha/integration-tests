@@ -19,6 +19,8 @@ jobs:
         with:
           registry-url: "https://registry.npmjs.org"
           node-version: 22
+      - name: Apply noble-curves fixes
+        run: ./apply-noble-curves-fix.sh
       - run: node integration.js
       - uses: actions/upload-artifact@v4
         with:
