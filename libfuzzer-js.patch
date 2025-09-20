@@ -1,0 +1,13 @@
+diff --git a/docs/libfuzzer-js.md b/docs/libfuzzer-js.md
+index abcdef..123456 100644
+--- a/docs/libfuzzer-js.md
++++ b/docs/libfuzzer-js.md
+@@ -4,7 +4,7 @@ This is required for fuzzing JavaScript libraries.
+ 
+ ```
+ export LIBFUZZER_A_PATH="-fsanitize=fuzzer"
+-git clone --depth 1 https://github.com/guidovranken/libfuzzer-js.git
++git clone --depth 1 https://github.com/sambacha/libfuzzer-js.git
+ cd libfuzzer-js/
+ make
+ export LIBFUZZER_JS_PATH=$(realpath .)

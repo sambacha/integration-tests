@@ -10,19 +10,96 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       MSHOULD_FAST: 1
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPRESS: true
+      CCACHE_COMPRESSLEVEL: 6
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2 # v4
         with:
           submodules: true
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4
         with:
           registry-url: "https://registry.npmjs.org"
           node-version: 22
-      - run: node integration.js
-      - uses: actions/upload-artifact@v4
+          cache: 'npm'
+          cache-dependency-path: |
+            **/package-lock.json
+            work/**/package-lock.json
+      
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+            work/*/node_modules
+          key: npm-integration-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            npm-integration-${{ runner.os }}-
+            npm-integration-
+      
+      - name: Cache integration test repositories
+        uses: actions/cache@v4
+        with:
+          path: work
+          key: integration-repos-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            integration-repos-${{ runner.os }}-
+            integration-repos-
+      
+      - name: Install ccache
+        run: sudo apt-get update && sudo apt-get install -y ccache
+      
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-integration-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-integration-${{ runner.os }}-
+            ccache-integration-
+      
+      - name: Configure ccache
+        run: |
+          ccache --version
+          ccache --zero-stats
+          ccache --max-size=500M
+          echo "CC=ccache gcc" >> $GITHUB_ENV
+          echo "CXX=ccache g++" >> $GITHUB_ENV
+      
+      - name: Apply noble-curves fixes
+        run: |
+          if [ -f apply-noble-curves-fix.sh ]; then
+            ./apply-noble-curves-fix.sh
+          fi
+      
+      - name: Run integration tests
+        run: node integration.js
+        timeout-minutes: 30
+      
+      - name: Show ccache stats
+        if: always()
+        run: ccache --show-stats
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: integration-logs
           path: work/logs
           overwrite: true
-          # compression-level: 9
+          retention-days: 7
+      
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-test-results
+          path: |
+            work/**/*.error
+            work/**/*.log
+          retention-days: 7
