@@ -98,8 +98,8 @@ cp "$1" "$2"
 EOF
 chmod +x to_bytecode
 
-# Compile js.o with LLD support
-clang++ -c js.cpp -o js.o -std=c++17 -fPIC -fuse-ld=lld
+# Compile js.o
+clang++ -c js.cpp -o js.o -std=c++17 -fPIC
 
 cd ..
 
@@ -110,6 +110,6 @@ echo "To use dfuzz with cryptofuzz and LLD:"
 echo "  export LIBFUZZER_JS_PATH=$PWD/dfuzz-bridge"
 echo "  export LINK_FLAGS=\$LIBFUZZER_JS_PATH/js.o"
 echo "  export LIBFUZZER_LINK=\"-fsanitize=fuzzer\""
-echo "  export LDFLAGS=\"-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto\""
-echo "  export CXXFLAGS=\"-gdwarf-5 -fuse-ld=lld -fno-omit-frame-pointer\""
+echo "  export LDFLAGS=\"-fuse-ld=lld -gdwarf-5\""
+echo "  export CXXFLAGS=\"-gdwarf-5 -fno-omit-frame-pointer\""
 echo ""

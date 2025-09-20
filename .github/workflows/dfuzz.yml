@@ -47,8 +47,8 @@ jobs:
             echo "CC=clang" >> $GITHUB_ENV
             echo "CXX=clang++" >> $GITHUB_ENV
           fi
-          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fuse-ld=lld -fno-omit-frame-pointer" >> $GITHUB_ENV
-          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto" >> $GITHUB_ENV
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5" >> $GITHUB_ENV
           echo "MAKEFLAGS=-j$(nproc 2>/dev/null || sysctl -n hw.ncpu)" >> $GITHUB_ENV
         
       - name: Build cryptofuzz with dfuzz

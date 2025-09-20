@@ -81,8 +81,8 @@ jobs:
           ccache --max-size=500M
           echo "CC=ccache clang-15" >> $GITHUB_ENV
           echo "CXX=ccache clang++-15" >> $GITHUB_ENV
-          echo "CXXFLAGS=-g -O2 -gdwarf-5 -fuse-ld=lld -fno-omit-frame-pointer" >> $GITHUB_ENV
-          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto" >> $GITHUB_ENV
+          echo "CXXFLAGS=-g -O2 -gdwarf-5 -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5" >> $GITHUB_ENV
       
       - name: Apply noble-curves fixes
         run: |

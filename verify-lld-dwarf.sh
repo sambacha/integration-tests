@@ -115,7 +115,7 @@ echo "6. Performance optimizations:"
 if [[ "$LDFLAGS" == *"--threads"* ]]; then
     echo "✅ Parallel linking enabled"
 else
-    echo "⚠️  Parallel linking not enabled (add -Wl,--threads=auto to LDFLAGS)"
+    echo "ℹ️  Parallel linking not configured (LLD 15 doesn't support --threads=auto)"
 fi
 
 if [[ "$CXXFLAGS" == *"-fno-omit-frame-pointer"* ]]; then
@@ -142,7 +142,7 @@ else
     echo "⚠️  Some configuration is missing. Please check the warnings above."
     echo ""
     echo "To fix, ensure these environment variables are set:"
-    echo "  export LDFLAGS=\"-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto\""
-    echo "  export CXXFLAGS=\"\$CXXFLAGS -gdwarf-5 -fuse-ld=lld -fno-omit-frame-pointer\""
+    echo "  export LDFLAGS=\"-fuse-ld=lld -gdwarf-5\""
+    echo "  export CXXFLAGS=\"\$CXXFLAGS -gdwarf-5 -fno-omit-frame-pointer\""
 fi
 echo ""

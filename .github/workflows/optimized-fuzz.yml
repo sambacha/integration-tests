@@ -135,7 +135,7 @@ jobs:
           echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
           echo "CC=ccache clang-15" >> $GITHUB_ENV
           echo "CXX=ccache clang++-15" >> $GITHUB_ENV
-          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5" >> $GITHUB_ENV
       
       - name: Setup ccache for module
         uses: actions/cache@v4
@@ -214,11 +214,11 @@ jobs:
           echo "LINK_FLAGS=$PWD/dfuzz-bridge/js.o" >> $GITHUB_ENV
           echo "USE_DFUZZ=1" >> $GITHUB_ENV
           echo "LIBFUZZER_LINK=-fsanitize=fuzzer" >> $GITHUB_ENV
-          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fuse-ld=lld -fno-omit-frame-pointer" >> $GITHUB_ENV
+          echo "CXXFLAGS=-fsanitize=fuzzer,address -g -O2 -gdwarf-5 -fno-omit-frame-pointer" >> $GITHUB_ENV
           echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
           echo "CC=ccache clang-15" >> $GITHUB_ENV
           echo "CXX=ccache clang++-15" >> $GITHUB_ENV
-          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5 -Wl,--threads=auto" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld -gdwarf-5" >> $GITHUB_ENV
       
       - name: Setup ccache for fuzzer
         uses: actions/cache@v4
