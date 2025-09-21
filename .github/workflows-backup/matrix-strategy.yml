@@ -1,0 +1,237 @@
+name: Matrix Test Strategy
+
+on:
+  workflow_call:
+    inputs:
+      test-matrix:
+        description: 'Test matrix configuration as JSON'
+        type: string
+        required: true
+      parallel-jobs:
+        description: 'Maximum parallel jobs'
+        type: number
+        default: 10
+      timeout-minutes:
+        description: 'Job timeout in minutes'  
+        type: number
+        default: 30
+
+jobs:
+  # Dynamic matrix generation based on changes
+  generate-matrix:
+    name: Generate Test Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.result }}
+      job-count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Analyze changes
+        id: changes
+        run: |
+          # Get changed files
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          else
+            CHANGED=$(git diff --name-only HEAD~1...HEAD)
+          fi
+          
+          echo "Changed files:"
+          echo "$CHANGED"
+          
+          # Determine affected components
+          COMPONENTS=""
+          echo "$CHANGED" | grep -q "\.js$\|\.ts$" && COMPONENTS="$COMPONENTS,javascript"
+          echo "$CHANGED" | grep -q "\.py$" && COMPONENTS="$COMPONENTS,python"
+          echo "$CHANGED" | grep -q "\.rs$" && COMPONENTS="$COMPONENTS,rust"
+          echo "$CHANGED" | grep -q "\.go$" && COMPONENTS="$COMPONENTS,golang"
+          
+          echo "components=${COMPONENTS#,}" >> $GITHUB_OUTPUT
+
+      - name: Generate optimized matrix
+        id: matrix
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const baseMatrix = JSON.parse(`${{ inputs.test-matrix }}`);
+            const components = '${{ steps.changes.outputs.components }}'.split(',').filter(Boolean);
+            
+            // Filter matrix based on changed components
+            let matrix = { ...baseMatrix };
+            
+            if (components.length > 0 && matrix.include) {
+              matrix.include = matrix.include.filter(item => {
+                if (!item.language) return true;
+                return components.includes(item.language);
+              });
+            }
+            
+            // Calculate optimal sharding
+            const totalJobs = (matrix.include?.length || 1) * 
+                            (matrix.os?.length || 1) * 
+                            (matrix.version?.length || 1);
+            
+            const maxParallel = Math.min(totalJobs, ${{ inputs.parallel-jobs }});
+            
+            // Add sharding if needed
+            if (totalJobs > maxParallel) {
+              const shardCount = Math.ceil(totalJobs / maxParallel);
+              matrix.shard = Array.from({length: shardCount}, (_, i) => i + 1);
+            }
+            
+            core.setOutput('result', JSON.stringify(matrix));
+            core.setOutput('count', totalJobs);
+            
+            // Log matrix for debugging
+            console.log('Generated matrix:', JSON.stringify(matrix, null, 2));
+            console.log(`Total jobs: ${totalJobs}, Max parallel: ${maxParallel}`);
+            
+            return matrix;
+
+  # Execute tests with optimized parallelization
+  run-matrix:
+    name: Test [${{ matrix.os }}/${{ matrix.version }}${{ matrix.shard && format('/shard-{0}', matrix.shard) || '' }}]
+    needs: generate-matrix
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+      max-parallel: ${{ inputs.parallel-jobs }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: |
+          echo "Setting up ${{ matrix.os }} with version ${{ matrix.version }}"
+          echo "Shard: ${{ matrix.shard || 'none' }}"
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache
+            ~/Library/Caches
+            ~/.npm
+            ~/.cargo
+            ~/.gradle
+          key: ${{ matrix.os }}-${{ matrix.version }}-${{ hashFiles('**/package-lock.json', '**/Cargo.lock', '**/go.sum') }}
+
+      - name: Install dependencies
+        run: |
+          # Install based on matrix configuration
+          case "${{ matrix.language }}" in
+            javascript|typescript)
+              npm ci --prefer-offline
+              ;;
+            python)
+              pip install -r requirements.txt
+              ;;
+            rust)
+              cargo build --release
+              ;;
+            golang)
+              go mod download
+              ;;
+          esac
+
+      - name: Run tests
+        id: test
+        run: |
+          # Run tests with sharding if applicable
+          if [ -n "${{ matrix.shard }}" ]; then
+            SHARD_INDEX=${{ matrix.shard }}
+            TOTAL_SHARDS=${{ needs.generate-matrix.outputs.job-count }}
+            echo "Running shard ${SHARD_INDEX} of ${TOTAL_SHARDS}"
+            
+            # Calculate which tests to run in this shard
+            npm test -- --shard=${SHARD_INDEX}/${TOTAL_SHARDS}
+          else
+            npm test
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.version }}${{ matrix.shard && format('-shard-{0}', matrix.shard) || '' }}
+          path: |
+            test-results/
+            coverage/
+
+  # Aggregate results from all matrix jobs
+  aggregate-results:
+    name: Aggregate Test Results
+    needs: run-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: all-results/
+
+      - name: Merge coverage reports
+        run: |
+          npm install -g nyc
+          nyc merge all-results coverage-merged
+          nyc report -t coverage-merged --reporter=text --reporter=lcov
+
+      - name: Generate summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Count test results
+            let totalTests = 0;
+            let passedTests = 0;
+            let failedTests = 0;
+            
+            const resultsDir = 'all-results';
+            if (fs.existsSync(resultsDir)) {
+              const files = fs.readdirSync(resultsDir, { withFileTypes: true });
+              for (const file of files) {
+                if (file.isDirectory()) {
+                  const resultFile = path.join(resultsDir, file.name, 'results.json');
+                  if (fs.existsSync(resultFile)) {
+                    const data = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+                    totalTests += data.total || 0;
+                    passedTests += data.passed || 0;
+                    failedTests += data.failed || 0;
+                  }
+                }
+              }
+            }
+            
+            // Create summary
+            const summary = `## Test Results Summary\n\n` +
+              `- **Total Tests**: ${totalTests}\n` +
+              `- **Passed**: ${passedTests} ✅\n` +
+              `- **Failed**: ${failedTests} ❌\n` +
+              `- **Success Rate**: ${totalTests > 0 ? ((passedTests/totalTests)*100).toFixed(2) : 0}%\n`;
+            
+            // Write to step summary
+            await core.summary
+              .addRaw(summary)
+              .write();
+            
+            // Comment on PR if applicable
+            if (context.eventName === 'pull_request') {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.payload.pull_request.number,
+                body: summary
+              });
+            }
+
+      - name: Upload merged coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage-merged/lcov.info
+          fail_ci_if_error: false

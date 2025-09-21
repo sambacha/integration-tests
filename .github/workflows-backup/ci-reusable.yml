@@ -1,0 +1,132 @@
+name: Reusable CI Components
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: '20'
+      python-version:
+        type: string
+        default: '3.11'
+      setup-only:
+        type: boolean
+        default: false
+      cache-key-suffix:
+        type: string
+        default: ''
+    outputs:
+      cache-key:
+        value: ${{ jobs.setup.outputs.cache-key }}
+
+jobs:
+  setup:
+    runs-on: ubuntu-22.04
+    outputs:
+      cache-key: ${{ steps.cache.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          
+      - name: Generate cache key
+        id: cache-key
+        run: |
+          FILES_HASH=${{ hashFiles('**/package-lock.json', '**/requirements*.txt', 'setup-*.sh') }}
+          echo "key=unified-${{ runner.os }}-${FILES_HASH}${{ inputs.cache-key-suffix }}" >> $GITHUB_OUTPUT
+          
+      - name: Setup unified cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            ~/.npm
+            ~/.cache
+            ~/tools
+            node_modules
+            cryptofuzz/modules/*/node_modules
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: |
+            unified-${{ runner.os }}-
+            
+      - name: Setup Node.js
+        if: inputs.setup-only == false
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          
+      - name: Setup Python
+        if: inputs.setup-only == false
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          
+      - name: Install system dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
+          
+          # Install LLVM/Clang for better performance
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s 15
+          sudo apt-get install -y clang-15 lld-15
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-15 100
+          
+      - name: Configure build environment
+        run: |
+          # Export optimized build flags
+          {
+            echo "CC=ccache clang-15"
+            echo "CXX=ccache clang++-15"
+            echo "LDFLAGS=-fuse-ld=lld"
+            echo "MAKEFLAGS=-j$(nproc)"
+            echo "CCACHE_DIR=$HOME/.ccache"
+            echo "CCACHE_MAXSIZE=500M"
+          } >> $GITHUB_ENV
+          
+          # Configure ccache
+          ccache --max-size=500M
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true' && inputs.setup-only == false
+        run: |
+          # Node dependencies
+          if [ -f package-lock.json ]; then
+            npm ci --prefer-offline --no-audit
+          fi
+          
+          # Python dependencies
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          
+          # Setup dfuzz if present
+          if [ -f setup-dfuzz.sh ]; then
+            ./setup-dfuzz.sh
+            mkdir -p ~/tools
+            cp -r dfuzz-bridge ~/tools/ || true
+          fi
+          
+      - name: Apply patches
+        if: inputs.setup-only == false
+        run: |
+          # Apply any patches needed for the build
+          if [ -f apply-patches.sh ]; then
+            ./apply-patches.sh
+          fi
+          
+      - name: Show environment info
+        run: |
+          echo "Node: $(node --version)"
+          echo "NPM: $(npm --version)"
+          echo "Python: $(python --version)"
+          echo "Clang: $(clang --version | head -n1)"
+          echo "ccache: $(ccache --version | head -n1)"
+          ccache --show-stats

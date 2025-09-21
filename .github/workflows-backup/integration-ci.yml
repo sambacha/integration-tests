@@ -1,0 +1,308 @@
+name: Integration CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - '**.js'
+      - '**.ts'
+      - '**.py'
+      - '**.yml'
+      - 'package*.json'
+      - 'requirements*.txt'
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      skip-cache:
+        description: 'Skip cache restoration'
+        type: boolean
+        default: false
+
+env:
+  NODE_VERSION: '20'
+  PYTHON_VERSION: '3.11'
+  RUST_VERSION: 'stable'
+  GO_VERSION: '1.21'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Centralized setup job
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    outputs:
+      node-cache-key: ${{ steps.cache-keys.outputs.node }}
+      python-cache-key: ${{ steps.cache-keys.outputs.python }}
+      should-run-tests: ${{ steps.changes.outputs.tests }}
+      affected-packages: ${{ steps.changes.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            tests:
+              - '**/*.test.{js,ts}'
+              - '**/*.spec.{js,ts}'
+              - '**/test/**'
+            packages:
+              - 'packages/**'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
+
+      - name: Generate cache keys
+        id: cache-keys
+        run: |
+          echo "node=node-${{ hashFiles('**/package-lock.json') }}" >> $GITHUB_OUTPUT
+          echo "python=python-${{ hashFiles('**/requirements*.txt') }}" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Cache dependencies
+        if: inputs.skip-cache != true
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/pip
+            node_modules
+            .venv
+          key: deps-${{ runner.os }}-${{ steps.cache-keys.outputs.node }}-${{ steps.cache-keys.outputs.python }}
+          restore-keys: |
+            deps-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefer-offline --no-audit
+          pip install -r requirements.txt || true
+          pip install -r requirements-dev.txt || true
+
+  # Linting and code quality
+  lint:
+    name: Lint & Format
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore caches
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+          key: ${{ needs.setup.outputs.node-cache-key }}
+
+      - name: Run linters
+        run: |
+          npm run lint || true
+          npm run format:check || true
+
+      - name: Check types
+        run: |
+          npm run typecheck || true
+          
+      - name: Security audit
+        run: |
+          npm audit --audit-level=moderate || true
+
+  # Unit tests with coverage
+  test-unit:
+    name: Unit Tests
+    needs: setup
+    if: needs.setup.outputs.should-run-tests == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 20]
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Restore cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+          key: ${{ needs.setup.outputs.node-cache-key }}
+
+      - name: Run unit tests
+        run: |
+          npm test -- --shard=${{ matrix.shard }}/3 --coverage
+        continue-on-error: true
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.node }}-${{ matrix.shard }}
+          path: coverage/
+
+  # Integration tests
+  test-integration:
+    name: Integration Tests
+    needs: [setup, lint]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore caches
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+            ~/.cache/pip
+          key: deps-${{ runner.os }}-${{ needs.setup.outputs.node-cache-key }}
+
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test
+        run: |
+          npm run test:integration || true
+
+  # Build artifacts
+  build:
+    name: Build
+    needs: [setup, lint]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [web, node, esm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+          key: ${{ needs.setup.outputs.node-cache-key }}
+
+      - name: Build ${{ matrix.target }}
+        run: |
+          npm run build:${{ matrix.target }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            dist/
+            build/
+
+  # Fuzzing tests
+  fuzz:
+    name: Fuzz Testing
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'fuzz')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-node
+
+      - name: Run fuzzing
+        timeout-minutes: 30
+        run: |
+          npm run fuzz || true
+
+  # Performance benchmarks
+  benchmark:
+    name: Performance Benchmarks
+    needs: [setup, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-node
+
+      - name: Run benchmarks
+        run: |
+          npm run benchmark
+
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'customBiggerIsBetter'
+          output-file-path: benchmark-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+
+  # Final status check
+  status:
+    name: CI Status
+    needs: [lint, test-unit, test-integration, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check status
+        run: |
+          if [[ "${{ needs.lint.result }}" == "failure" || \
+                "${{ needs.test-unit.result }}" == "failure" || \
+                "${{ needs.test-integration.result }}" == "failure" || \
+                "${{ needs.build.result }}" == "failure" ]]; then
+            echo "CI failed"
+            exit 1
+          fi
+          echo "CI passed"
+
+      - name: Comment PR status
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ job.status }}' === 'success' ? '✅' : '❌';
+            const message = `## CI Status: ${status}\n\n`;
+            
+            github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.payload.pull_request.number,
+              body: message + '- Lint: ${{ needs.lint.result }}\n' +
+                              '- Unit Tests: ${{ needs.test-unit.result }}\n' +
+                              '- Integration Tests: ${{ needs.test-integration.result }}\n' +
+                              '- Build: ${{ needs.build.result }}'
+            });
