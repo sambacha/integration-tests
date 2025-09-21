@@ -1,0 +1,114 @@
+name: Reusable Setup Workflow
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '20'
+      python-version:
+        description: 'Python version'
+        type: string
+        default: '3.11'
+      cache-key-prefix:
+        description: 'Cache key prefix for dependencies'
+        type: string
+        default: 'deps'
+      working-directory:
+        description: 'Working directory'
+        type: string
+        default: '.'
+      install-deps:
+        description: 'Install dependencies'
+        type: boolean
+        default: true
+      setup-ccache:
+        description: 'Setup ccache'
+        type: boolean
+        default: false
+    outputs:
+      cache-hit:
+        description: 'Cache hit status'
+        value: ${{ jobs.setup.outputs.cache-hit }}
+      node-modules-cache-key:
+        description: 'Node modules cache key'
+        value: ${{ jobs.setup.outputs.node-modules-cache-key }}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+      node-modules-cache-key: ${{ steps.cache-key.outputs.key }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup Node.js
+        if: inputs.node-version != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Setup Python
+        if: inputs.python-version != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: 'pip'
+
+      - name: Generate cache key
+        id: cache-key
+        run: |
+          echo "key=${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ hashFiles('**/package-lock.json', '**/requirements*.txt', '**/pyproject.toml') }}" >> $GITHUB_OUTPUT
+
+      - name: Cache dependencies
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/pip
+            ${{ inputs.working-directory }}/node_modules
+            ~/.ccache
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: |
+            ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
+
+      - name: Setup ccache
+        if: inputs.setup-ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
+          echo "CC=ccache gcc" >> $GITHUB_ENV
+          echo "CXX=ccache g++" >> $GITHUB_ENV
+          ccache --max-size=500M
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+
+      - name: Install dependencies
+        if: inputs.install-deps && steps.cache.outputs.cache-hit != 'true'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci --prefer-offline --no-audit
+          fi
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f "requirements-dev.txt" ]; then
+            pip install -r requirements-dev.txt
+          fi
+
+      - name: Display environment info
+        run: |
+          echo "Node version: $(node --version)"
+          echo "NPM version: $(npm --version)"
+          echo "Python version: $(python --version)"
+          echo "Working directory: ${{ inputs.working-directory }}"

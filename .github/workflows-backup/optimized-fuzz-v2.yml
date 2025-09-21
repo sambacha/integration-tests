@@ -1,0 +1,381 @@
+name: Optimized Fuzzing Pipeline
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM
+  push:
+    branches: [main]
+    paths:
+      - 'src/**/*.{c,cpp,rs,go}'
+      - 'fuzz/**'
+  pull_request:
+    branches: [main]
+    types: [labeled]  # Run when 'fuzz' label is added
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzzing duration (seconds)'
+        type: number
+        default: 3600
+      targets:
+        description: 'Specific targets to fuzz (comma-separated)'
+        type: string
+        default: 'all'
+      sanitizer:
+        description: 'Sanitizer to use'
+        type: choice
+        options:
+          - address
+          - memory
+          - undefined
+          - thread
+        default: address
+
+env:
+  LLVM_VERSION: '15'
+  AFL_VERSION: '4.09c'
+  LIBFUZZER_VERSION: '2024.01'
+  HONGGFUZZ_VERSION: '2.6'
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false  # Don't cancel fuzzing jobs
+
+jobs:
+  # Prepare fuzzing environment and targets
+  prepare:
+    name: Prepare Fuzzing
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.list }}
+      cache-key: ${{ steps.cache.outputs.key }}
+      corpus-exists: ${{ steps.corpus.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Identify fuzz targets
+        id: targets
+        run: |
+          if [[ "${{ inputs.targets }}" == "all" ]]; then
+            TARGETS=$(find . -name "*_fuzz.c" -o -name "*_fuzz.cpp" -o -name "*_fuzz.rs" | \
+                     xargs -n1 basename | sed 's/\.[^.]*$//' | \
+                     jq -R -s -c 'split("\n")[:-1]')
+          else
+            TARGETS=$(echo "${{ inputs.targets }}" | \
+                     jq -R -s -c 'split(",") | map(gsub("\\s+"; ""))')
+          fi
+          echo "list=${TARGETS}" >> $GITHUB_OUTPUT
+          echo "Found targets: ${TARGETS}"
+
+      - name: Generate cache key
+        id: cache
+        run: |
+          KEY="fuzz-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/package-lock.json', '**/go.sum') }}"
+          echo "key=${KEY}" >> $GITHUB_OUTPUT
+
+      - name: Check for existing corpus
+        id: corpus
+        run: |
+          if [[ -d "corpus" ]] || [[ -d "fuzz/corpus" ]]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup fuzzing tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-${{ env.LLVM_VERSION }} \
+            llvm-${{ env.LLVM_VERSION }} \
+            libc++-${{ env.LLVM_VERSION }}-dev \
+            libc++abi-${{ env.LLVM_VERSION }}-dev \
+            build-essential \
+            cmake \
+            ninja-build
+
+      - name: Cache fuzzing tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/afl
+            ~/honggfuzz
+            ~/libfuzzer
+          key: fuzz-tools-${{ runner.os }}-${{ env.AFL_VERSION }}-${{ env.HONGGFUZZ_VERSION }}
+
+  # Build fuzz targets with different sanitizers
+  build:
+    name: Build Targets [${{ matrix.sanitizer }}]
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        sanitizer: [address, memory, undefined]
+        include:
+          - sanitizer: address
+            flags: "-fsanitize=address -fsanitize-address-use-after-scope"
+          - sanitizer: memory
+            flags: "-fsanitize=memory -fsanitize-memory-track-origins"
+          - sanitizer: undefined
+            flags: "-fsanitize=undefined -fno-sanitize-recover=all"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo
+            ~/afl
+            ~/honggfuzz
+          key: ${{ needs.prepare.outputs.cache-key }}
+
+      - name: Setup build environment
+        run: |
+          echo "CC=clang-${{ env.LLVM_VERSION }}" >> $GITHUB_ENV
+          echo "CXX=clang++-${{ env.LLVM_VERSION }}" >> $GITHUB_ENV
+          echo "CFLAGS=${{ matrix.flags }} -g -O1" >> $GITHUB_ENV
+          echo "CXXFLAGS=${{ matrix.flags }} -g -O1" >> $GITHUB_ENV
+          echo "LDFLAGS=-fuse-ld=lld" >> $GITHUB_ENV
+
+      - name: Build with ${{ matrix.sanitizer }}
+        run: |
+          mkdir -p build/${{ matrix.sanitizer }}
+          cd build/${{ matrix.sanitizer }}
+          
+          # Build based on project type
+          if [ -f "../../CMakeLists.txt" ]; then
+            cmake ../.. -GNinja \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DENABLE_FUZZING=ON \
+              -DSANITIZER=${{ matrix.sanitizer }}
+            ninja
+          elif [ -f "../../Cargo.toml" ]; then
+            cargo fuzz build --sanitizer ${{ matrix.sanitizer }}
+          else
+            make -C ../.. fuzz SANITIZER=${{ matrix.sanitizer }}
+          fi
+
+      - name: Upload fuzz binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-binaries-${{ matrix.sanitizer }}
+          path: |
+            build/${{ matrix.sanitizer }}/**/*_fuzz
+            target/*/release/*_fuzz
+
+  # Run fuzzing with different engines
+  fuzz:
+    name: Fuzz [${{ matrix.engine }}/${{ matrix.target }}]
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJson(inputs.duration || 3600) / 60 + 10 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [libfuzzer, afl++, honggfuzz]
+        target: ${{ fromJson(needs.prepare.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download fuzz binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-binaries-${{ inputs.sanitizer || 'address' }}
+
+      - name: Restore corpus
+        if: needs.prepare.outputs.corpus-exists == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            corpus/
+            fuzz/corpus/
+          key: corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            corpus-${{ matrix.target }}-
+
+      - name: Setup fuzzing directory
+        run: |
+          mkdir -p fuzz-work/${{ matrix.target }}/{corpus,crashes,hangs}
+          if [ -d "corpus/${{ matrix.target }}" ]; then
+            cp -r corpus/${{ matrix.target }}/* fuzz-work/${{ matrix.target }}/corpus/
+          fi
+
+      - name: Run ${{ matrix.engine }} fuzzing
+        id: fuzz
+        run: |
+          DURATION=${{ inputs.duration || 3600 }}
+          TARGET_BIN=$(find . -name "${{ matrix.target }}_fuzz" -type f | head -1)
+          
+          case "${{ matrix.engine }}" in
+            libfuzzer)
+              timeout ${DURATION}s ${TARGET_BIN} \
+                fuzz-work/${{ matrix.target }}/corpus \
+                -max_total_time=${DURATION} \
+                -print_final_stats=1 \
+                -artifact_prefix=fuzz-work/${{ matrix.target }}/crashes/ \
+                2>&1 | tee fuzz.log
+              ;;
+            afl++)
+              export AFL_SKIP_CPUFREQ=1
+              export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+              timeout ${DURATION}s afl-fuzz \
+                -i fuzz-work/${{ matrix.target }}/corpus \
+                -o fuzz-work/${{ matrix.target }}/output \
+                -t 1000 \
+                -- ${TARGET_BIN} @@ \
+                2>&1 | tee fuzz.log
+              ;;
+            honggfuzz)
+              timeout ${DURATION}s honggfuzz \
+                --input fuzz-work/${{ matrix.target }}/corpus \
+                --output fuzz-work/${{ matrix.target }}/crashes \
+                --workspace fuzz-work/${{ matrix.target }} \
+                --timeout 10 \
+                --threads $(nproc) \
+                -- ${TARGET_BIN} ___FILE___ \
+                2>&1 | tee fuzz.log
+              ;;
+          esac
+          
+          # Check for crashes
+          CRASHES=$(find fuzz-work/${{ matrix.target }}/crashes -type f 2>/dev/null | wc -l)
+          echo "crashes=${CRASHES}" >> $GITHUB_OUTPUT
+
+      - name: Process fuzzing results
+        if: always()
+        run: |
+          echo "## Fuzzing Results: ${{ matrix.engine }}/${{ matrix.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Duration: ${{ inputs.duration || 3600 }} seconds" >> $GITHUB_STEP_SUMMARY
+          echo "- Crashes found: ${{ steps.fuzz.outputs.crashes || 0 }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f fuzz.log ]; then
+            echo "### Statistics" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -20 fuzz.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Minimize corpus
+        if: success()
+        run: |
+          # Minimize corpus for next run
+          if command -v llvm-cov &> /dev/null; then
+            TARGET_BIN=$(find . -name "${{ matrix.target }}_fuzz" -type f | head -1)
+            mkdir -p minimized-corpus
+            ${TARGET_BIN} -merge=1 minimized-corpus fuzz-work/${{ matrix.target }}/corpus
+            rm -rf fuzz-work/${{ matrix.target }}/corpus
+            mv minimized-corpus fuzz-work/${{ matrix.target }}/corpus
+          fi
+
+      - name: Save corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz-work/${{ matrix.target }}/corpus
+          key: corpus-${{ matrix.target }}-${{ github.sha }}
+
+      - name: Upload crashes
+        if: steps.fuzz.outputs.crashes > 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashes-${{ matrix.engine }}-${{ matrix.target }}
+          path: fuzz-work/${{ matrix.target }}/crashes/
+
+  # Analyze crashes and create issues
+  analyze:
+    name: Analyze Results
+    needs: fuzz
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all crashes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: crashes-*
+          path: all-crashes/
+
+      - name: Deduplicate crashes
+        run: |
+          mkdir -p unique-crashes
+          for crash in all-crashes/crashes-*/*; do
+            if [ -f "$crash" ]; then
+              HASH=$(sha256sum "$crash" | cut -d' ' -f1)
+              if [ ! -f "unique-crashes/$HASH" ]; then
+                cp "$crash" "unique-crashes/$HASH"
+                echo "New unique crash: $HASH"
+              fi
+            fi
+          done
+          
+          echo "Total unique crashes: $(ls unique-crashes | wc -l)"
+
+      - name: Create security report
+        run: |
+          python3 - << 'EOF'
+          import os
+          import json
+          import hashlib
+          from pathlib import Path
+          
+          crashes = []
+          for crash_file in Path('unique-crashes').glob('*'):
+              with open(crash_file, 'rb') as f:
+                  content = f.read()
+                  crashes.append({
+                      'hash': crash_file.name,
+                      'size': len(content),
+                      'preview': content[:100].hex() if content else ''
+                  })
+          
+          report = {
+              'total_crashes': len(crashes),
+              'crashes': crashes[:10]  # Top 10
+          }
+          
+          with open('security-report.json', 'w') as f:
+              json.dump(report, f, indent=2)
+          
+          print(f"Found {len(crashes)} unique crashes")
+          EOF
+
+      - name: Create GitHub issue for crashes
+        if: steps.analyze.outputs.crashes > 0
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('security-report.json', 'utf8'));
+            
+            if (report.total_crashes > 0) {
+              const issue = await github.rest.issues.create({
+                ...context.repo,
+                title: `🔒 Fuzzing found ${report.total_crashes} potential security issues`,
+                body: `## Fuzzing Report\n\n` +
+                      `The automated fuzzing pipeline discovered ${report.total_crashes} unique crashes.\n\n` +
+                      `### Summary\n` +
+                      `- Run ID: ${context.runId}\n` +
+                      `- Commit: ${context.sha}\n` +
+                      `- Crashes: ${report.total_crashes}\n\n` +
+                      `### Action Required\n` +
+                      `Please review the attached crash files and fix any security vulnerabilities.\n\n` +
+                      `[View Full Report](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                labels: ['security', 'fuzzing', 'bug']
+              });
+            }
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: |
+            security-report.json
+            unique-crashes/

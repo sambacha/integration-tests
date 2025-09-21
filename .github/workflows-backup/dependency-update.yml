@@ -1,0 +1,283 @@
+name: Automated Dependency Updates
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'  # Weekly on Monday at 3 AM
+  workflow_dispatch:
+    inputs:
+      update-type:
+        description: 'Type of updates to perform'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - security
+        default: patch
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  # Check for dependency updates
+  check-updates:
+    name: Check for Updates
+    runs-on: ubuntu-latest
+    outputs:
+      has-updates: ${{ steps.check.outputs.has-updates }}
+      update-summary: ${{ steps.check.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Check for npm updates
+        id: npm-check
+        run: |
+          npm outdated --json > npm-updates.json || true
+          npx npm-check-updates --jsonUpgraded > ncu-updates.json || true
+          
+          # Check for security updates
+          npm audit --json > npm-audit.json || true
+
+      - name: Check for Python updates
+        id: pip-check
+        run: |
+          pip list --outdated --format json > pip-updates.json || true
+          
+          # Safety check for security vulnerabilities
+          pip install safety
+          safety check --json > safety-report.json || true
+
+      - name: Analyze updates
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // Parse npm updates
+            let npmUpdates = {};
+            try {
+              npmUpdates = JSON.parse(fs.readFileSync('ncu-updates.json', 'utf8'));
+            } catch {}
+            
+            // Parse Python updates
+            let pipUpdates = [];
+            try {
+              pipUpdates = JSON.parse(fs.readFileSync('pip-updates.json', 'utf8'));
+            } catch {}
+            
+            // Parse security issues
+            let securityIssues = [];
+            try {
+              const npmAudit = JSON.parse(fs.readFileSync('npm-audit.json', 'utf8'));
+              securityIssues = npmAudit.vulnerabilities || {};
+            } catch {}
+            
+            const hasUpdates = Object.keys(npmUpdates).length > 0 || 
+                              pipUpdates.length > 0 || 
+                              Object.keys(securityIssues).length > 0;
+            
+            const summary = {
+              npm: Object.keys(npmUpdates).length,
+              python: pipUpdates.length,
+              security: Object.keys(securityIssues).length,
+              details: {
+                npm: npmUpdates,
+                python: pipUpdates,
+                security: securityIssues
+              }
+            };
+            
+            core.setOutput('has-updates', hasUpdates);
+            core.setOutput('summary', JSON.stringify(summary));
+            
+            return hasUpdates;
+
+      - name: Upload update reports
+        if: steps.check.outputs.has-updates == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-reports
+          path: |
+            *-updates.json
+            *-audit.json
+            *-report.json
+
+  # Update dependencies
+  update-dependencies:
+    name: Update Dependencies
+    needs: check-updates
+    if: needs.check-updates.outputs.has-updates == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create update branch
+        run: |
+          BRANCH="deps/update-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b $BRANCH
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+
+      - name: Update npm dependencies
+        run: |
+          UPDATE_TYPE="${{ inputs.update-type || 'patch' }}"
+          
+          case $UPDATE_TYPE in
+            patch)
+              npx npm-check-updates -u --target patch
+              ;;
+            minor)
+              npx npm-check-updates -u --target minor
+              ;;
+            major)
+              npx npm-check-updates -u
+              ;;
+            security)
+              npm audit fix --force || true
+              ;;
+          esac
+          
+          # Clean install to update lock file
+          rm -rf node_modules
+          npm install
+
+      - name: Update Python dependencies
+        run: |
+          if [ -f "requirements.txt" ]; then
+            pip install --upgrade pip pip-tools
+            
+            # Generate updated requirements
+            if [ -f "requirements.in" ]; then
+              pip-compile requirements.in --upgrade
+            else
+              pip list --format freeze > requirements.txt
+            fi
+          fi
+
+      - name: Run tests
+        id: test
+        continue-on-error: true
+        run: |
+          # Run basic tests to ensure updates don't break
+          npm test || TEST_FAILED=1
+          echo "test-failed=${TEST_FAILED:-0}" >> $GITHUB_OUTPUT
+
+      - name: Commit changes
+        run: |
+          git add -A
+          git diff --staged --quiet || git commit -m "chore: update dependencies
+
+          - Update npm packages
+          - Update Python packages
+          - Fix security vulnerabilities
+          
+          Update type: ${{ inputs.update-type || 'patch' }}
+          Auto-generated by dependency update workflow"
+
+      - name: Push changes
+        if: steps.test.outputs.test-failed != '1'
+        run: |
+          git push origin ${{ env.BRANCH }}
+
+      - name: Create pull request
+        if: steps.test.outputs.test-failed != '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const summary = JSON.parse(`${{ needs.check-updates.outputs.update-summary }}`);
+            
+            const body = `## 🔄 Automated Dependency Updates\n\n` +
+              `This PR contains automated dependency updates.\n\n` +
+              `### Summary\n` +
+              `- **NPM packages**: ${summary.npm} updates\n` +
+              `- **Python packages**: ${summary.python} updates\n` +
+              `- **Security fixes**: ${summary.security} vulnerabilities\n\n` +
+              `### Update Type\n` +
+              `${{ inputs.update-type || 'patch' }}\n\n` +
+              `### Testing\n` +
+              `- [x] Dependencies installed successfully\n` +
+              `- [x] Tests pass with updated dependencies\n` +
+              `- [ ] Manual review required\n\n` +
+              `### Next Steps\n` +
+              `1. Review the changes\n` +
+              `2. Run additional tests if needed\n` +
+              `3. Merge when ready\n\n` +
+              `---\n` +
+              `*This PR was automatically created by the dependency update workflow.*`;
+            
+            const pr = await github.rest.pulls.create({
+              ...context.repo,
+              title: '⬆️ Update dependencies',
+              head: '${{ env.BRANCH }}',
+              base: 'main',
+              body: body
+            });
+            
+            // Add labels
+            await github.rest.issues.addLabels({
+              ...context.repo,
+              issue_number: pr.data.number,
+              labels: ['dependencies', 'automated']
+            });
+            
+            // Enable auto-merge if tests passed
+            if ('${{ steps.test.outputs.test-failed }}' !== '1') {
+              try {
+                await github.rest.pulls.merge({
+                  ...context.repo,
+                  pull_number: pr.data.number,
+                  merge_method: 'squash'
+                });
+              } catch (e) {
+                console.log('Auto-merge not available or failed:', e.message);
+              }
+            }
+
+      - name: Create issue if tests failed
+        if: steps.test.outputs.test-failed == '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              ...context.repo,
+              title: '⚠️ Dependency update tests failed',
+              body: `## Dependency Update Failed\n\n` +
+                    `The automated dependency update failed during testing.\n\n` +
+                    `### Branch\n` +
+                    `${{ env.BRANCH }}\n\n` +
+                    `### Action Required\n` +
+                    `Please manually review and fix the dependency conflicts.\n\n` +
+                    `[View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+              labels: ['bug', 'dependencies', 'help wanted']
+            });

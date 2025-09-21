@@ -1,50 +1,67 @@
-name: Crypto Compliance Testing with crypto-condor
+name: Crypto Compliance Testing
 
 on:
   push:
     branches: [main, develop, fix-ci]
   pull_request:
     branches: [main]
-
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly comprehensive tests
   workflow_dispatch:
     inputs:
       test_profile:
-        description: 'Test profile to run'
+        description: 'Test profile'
         required: true
         default: 'standard'
         type: choice
         options:
-          - quick      # 5-10 min for PR validation
-          - standard   # 30-45 min with NIST vectors
-          - comprehensive  # 2-3 hours with all vectors
+          - quick         # 5-10 min for PR validation
+          - standard      # 30-45 min with NIST vectors
+          - comprehensive # 2-3 hours with all vectors
+      debug:
+        description: 'Enable debug logging'
+        type: boolean
+        default: false
 
 env:
-  ACTIONS_RUNNER_DEBUG: true
+  ACTIONS_RUNNER_DEBUG: ${{ inputs.debug || false }}
   NODE_VERSION: '20'
   PYTHON_VERSION: '3.11'
   CRYPTO_CONDOR_VERSION: '2024.08.23'
+  CACHE_VERSION: 'v1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Job 1: Setup and determine test configuration
-  setup:
-    name: Setup Test Environment
+  # Determine test configuration based on trigger
+  config:
+    name: Configure Test Strategy
     runs-on: ubuntu-latest
     outputs:
-      test-profile: ${{ steps.profile.outputs.profile }}
+      profile: ${{ steps.profile.outputs.profile }}
       matrix: ${{ steps.matrix.outputs.matrix }}
+      cache-key: ${{ steps.cache.outputs.key }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github
+            package.json
+            requirements*.txt
       
       - name: Determine test profile
         id: profile
         run: |
+          PROFILE="${{ inputs.test_profile || 'standard' }}"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "profile=quick" >> $GITHUB_OUTPUT
+            PROFILE="quick"
           elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-            echo "profile=comprehensive" >> $GITHUB_OUTPUT
-          else
-            echo "profile=${{ inputs.test_profile || 'standard' }}" >> $GITHUB_OUTPUT
+            PROFILE="comprehensive"
           fi
+          echo "profile=${PROFILE}" >> $GITHUB_OUTPUT
+          echo "Selected profile: ${PROFILE}"
           
       - name: Generate test matrix
         id: matrix
